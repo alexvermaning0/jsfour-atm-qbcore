@@ -5,24 +5,7 @@
 // Written by Jonas Svensson, July 2018
 // *******
 
-let ESX = false;
-
-// Checks if es_extended has been started to make it standalone..
-if ( GetResourceState('es_extended') === 'started' ) {
-    emit('esx:getSharedObject', ( obj ) =>  { ESX = obj; });
-}
-
-// Execute SQL query
-async function executeQuery( sql, query, params ) {
-    return new Promise( ( resolve, reject ) => {
-        exports['mysql-async'][sql](query, params, ( result, err ) => {
-            if ( err )
-                return reject( err );
-           
-            return resolve( result );
-        });
-    });
-}
+let QBCore = exports["qb-core"].GetCoreObject()
 
 // Register server events
 RegisterNetEvent('jsfour-atm:getUserData');
@@ -37,61 +20,42 @@ onNet('jsfour-atm:getUserData', async ( data ) => {
     let player = source;
     let identifier = GetPlayerIdentifier(player);
     let money = {};
+    let userInfo = {}
 
-    // If ESX is enabled
-    if ( ESX ) {
-        let xPlayer = ESX.GetPlayerFromId(player);
-        money = {
-            bank: xPlayer.getAccount('bank').money,
-            cash: xPlayer.getMoney()
-        }
-    } else {
-        // Otherwise.. Add your own stuff
-        money = {
-            bank: 9999,
-            cash: 1000
-        }
+    let Player = QBCore.Functions.GetPlayer(player)
+    money = {
+        bank: Player.PlayerData.money.bank,
+        cash: Player.PlayerData.money.cash
     }
+    userInfo = {
+        firstname: Player.PlayerData.charinfo.firstname,
+        lastname: Player.PlayerData.charinfo.lastname,
+    }
+    identifier = Player.PlayerData.citizenid
 
-    let user = await executeQuery(
-        'mysql_fetch_all', 
-        'SELECT `firstname`, `lastname` FROM `users` WHERE `identifier` = @identifier', { 
+    let account = await exports.oxmysql.single_async(
+        'SELECT `account`, `pincode` FROM `jsfour_atm` WHERE `identifier` = @identifier', { 
         '@identifier': identifier
     });
-
-    if ( user.length > 0 ) {
-        let account = await executeQuery(
-            'mysql_fetch_all', 
-            'SELECT `account`, `pincode` FROM `jsfour_atm` WHERE `identifier` = @identifier', { 
-            '@identifier': identifier
-        });
-
-        emitNet('jsfour-atm:callback', player, {
-            firstname: user[0].firstname,
-            lastname: user[0].lastname,
-            account: account[0].account,
-            pincode: account[0].pincode,
-            money: money
-        }, data.CallbackID);
-    }
+    emitNet('jsfour-atm:callback', player, {
+        firstname: userInfo.firstname,
+        lastname: userInfo.lastname,
+        account: account.account,
+        pincode: account.pincode,
+        money: money
+    }, data.CallbackID);
 });
 
 // Deposit money
 onNet('jsfour-atm:deposit', ( data ) => {
     let player = source;
     let amount = parseInt(data);
-
-    // If ESX is enabled
-    if ( ESX ) {
-        let xPlayer = ESX.GetPlayerFromId(player);
-
-        if ( amount <= xPlayer.getMoney() ) {
-            xPlayer.removeMoney(amount);
-            xPlayer.addAccountMoney('bank', amount);
-            emitNet('esx:showNotification', player, `You've deposited ~s~${ amount }`);
-        }
+    let Player = QBCore.Functions.GetPlayer(player)
+    if (Player.Functions.RemoveMoney("cash", amount)) {
+        Player.Functions.AddMoney("bank", amount)
+        emitNet("QBCore:Notify", player, "Successful!", "success")
     } else {
-        // Otherwise.. Add your own stuff
+        emitNet("QBCore:Notify", player, "You don't have enough money!", "error")
     }
 });
 
@@ -100,19 +64,12 @@ onNet('jsfour-atm:withdraw', ( data ) => {
     let player = source;
     let amount = parseInt(data);
 
-     // If ESX is enabled
-     if ( ESX ) {
-        let xPlayer = ESX.GetPlayerFromId(player);
-        let accountMoney = xPlayer.getAccount('bank').money;
-
-        if ( amount <= accountMoney ) {
-            xPlayer.removeAccountMoney('bank', amount);
-            xPlayer.addMoney(amount);
-            emitNet('esx:showNotification', player, `You've withdrawed ~s~${ amount }`);
-        }
+    let Player = QBCore.Functions.GetPlayer(player);
+    if (Player.Functions.RemoveMoney("bank", amount)) {
+        Player.Functions.AddMoney("cash", amount)
+        emitNet("QBCore:Notify", player, "Successful!", "success")
     } else {
-        // Otherwise.. Add your own stuff
-        
+        emitNet("QBCore:Notify", player, "You don't have enough money!", "error")
     }
 });
 
@@ -120,8 +77,7 @@ onNet('jsfour-atm:withdraw', ( data ) => {
 onNet('jsfour-atm:transfer', async ( data ) => {
     let player = source;
 
-    let identifier = await executeQuery(
-        'mysql_fetch_all', 
+    let receiverId = await exports.oxmysql.single_async(
         'SELECT `identifier` FROM `jsfour_atm` WHERE `account` = @account', { 
         '@account': data.receiver
     });
@@ -129,30 +85,16 @@ onNet('jsfour-atm:transfer', async ( data ) => {
     if ( identifier.length > 0 ) {
         let amount = parseInt(data.amount);
 
-        // If ESX is enabled
-        if ( ESX ) {
-            let xReceiver = ESX.GetPlayerFromIdentifier(identifier[0].identifier);
-            let xSender = ESX.GetPlayerFromId(player);
-            let accountMoney = xSender.getAccount('bank').money;
-
-            if ( amount <= accountMoney ) {
-                xSender.removeAccountMoney('bank', amount);
-                xReceiver.addAccountMoney('bank', amount);
-
-                let user = await executeQuery(
-                    'mysql_fetch_all', 
-                    'SELECT `firstname`, `lastname` FROM `users` WHERE `identifier` = @receiver UNION SELECT `firstname`, `lastname` FROM `users` WHERE `identifier` = @sender', { 
-                    '@receiver': identifier[0].identifier,
-                    '@sender': GetPlayerIdentifier(player)
-                });
-
-                if ( user.length > 0 ) {
-                    emitNet('esx:showNotification', player, `You've sent ~s~${ amount } to ${ user[0].firstname }`);
-                    emitNet('esx:showNotification', xReceiver.source, `You've received ~s~${ amount } from ${ user[1].firstname }`);
-                }
+        let Receiver = QBCore.Functions.GetPlayerByCitizenId(receiverId)
+        let Sender = QBCore.Functions.GetPlayer(player)
+        if (Receiver) {
+            if (Sender.Functions.RemoveMoney("bank", amount)) {
+                Receiver.Functions.AddMoney("bank", amount)
+                emitNet("QBCore:Notify", player, `You sent ${amount} to ${Receiver.PlayerData.charinfo.firstname} ${Receiver.PlayerData.charinfo.lastname}`, "success")
+                emitNet("QBCore:Notify", player, `You received ${amount} from ${Sender.PlayerData.charinfo.firstname} ${Sender.PlayerData.charinfo.lastname}`, "success")
             }
         } else {
-            // Otherwise.. Add your own stuff
+            emitNet("QBCore:Notify", player, `Player is offline`, "error")
         }
     }
 });
@@ -161,40 +103,45 @@ onNet('jsfour-atm:transfer', async ( data ) => {
 onNet('jsfour-atm:create', async ( data ) => {
     let player = source;
     let identifier = GetPlayerIdentifier(player);
+    if (QBCore) { identifier = QBCore.Functions.GetPlayer(player).PlayerData.citizenid }
     let number = Math.floor(Math.random() * (999999999 - 111111111));
-
-    let account = await executeQuery(
-        'mysql_fetch_all', 
+    let account_exists = await exports.oxmysql.query_async(
         'SELECT `account` FROM `jsfour_atm` WHERE `account` = @account', { 
         '@account': number
-    });
-
-    if ( account.length === 0 ) {
-        let check = await executeQuery(
-            'mysql_fetch_all', 
-            'SELECT `identifier` FROM `jsfour_atm` WHERE `identifier` = @identifier', { 
-            '@identifier': identifier
-        });
-
-        if ( check.length === 0 ) {
-            executeQuery(
-                'mysql_execute', 
+    })
+    while (account_exists.length > 0) {
+        number = Math.floor(Math.random() * (999999999 - 111111111));
+        account_exists = await exports.oxmysql.query_async(
+            'SELECT `account` FROM `jsfour_atm` WHERE `account` = @account', { 
+            '@account': number
+        })
+    }
+    exports.oxmysql.query(
+        'SELECT `identifier` FROM `jsfour_atm` WHERE `identifier` = @identifier', { 
+        '@identifier': identifier
+    }, function(result) {
+        if ( result.length === 0 ) {
+            exports.oxmysql.insert(
                 'INSERT INTO `jsfour_atm` (`identifier`, `account`) VALUES (@identifier, @account)', { 
                 '@identifier': identifier,
                 '@account': number
             });
         }
-    } else {
-        // Number already exists... FUCK
-    }
+    });
 });
 
 // Change pincode
-onNet('jsfour-atm:changePincode', ( data ) => {
-    executeQuery(
-        'mysql_execute', 
-        'UPDATE `jsfour_atm` SET `pincode` = @pincode WHERE `account` = @account', {
-        '@account': data.account,
-        '@pincode': data.pincode
-    });
+onNet('jsfour-atm:changePincode', async ( data ) => {
+    let src = source
+    let Player = QBCore.Functions.GetPlayer(src)
+    let owner = await exports.oxmysql.scalar_async('SELECT identifier FROM `jsfour_atm` WHERE `account` = @account', {
+        '@account': data.account
+    })
+    if (owner == Player.PlayerData.citizenid) {
+        exports.oxmysql.update(
+            'UPDATE `jsfour_atm` SET `pincode` = @pincode WHERE `account` = @account', {
+            '@account': data.account,
+            '@pincode': data.pincode
+        });
+    }
 });
